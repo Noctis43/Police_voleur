@@ -6,19 +6,23 @@ import os
 import queue
 import sys
 import threading
-from collections import Counter, namedtuple
 
 import pygame
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from config import (
-    CENTER,
-    DEFAULT_DEPTH,
-    MAX_PLY,
-    REPETITION_LIMIT,
-    START_COPS,
-    START_THIEF,
+from config import DEFAULT_DEPTH
+from reseau import SessionReseau, ip_locale
+from serveur import PORT_DEFAUT
+from regles import (
+    ARETES,
+    NODES,
+    POLICE,
+    TYPE_ARETE,
+    VOLEUR,
+    Partie,
+    REGLES,
+    creer_observation,
 )
 
 
@@ -53,208 +57,6 @@ RAYON_CLIC = 0.04
 PROFONDEUR_MIN = 2
 PROFONDEUR_MAX = 8
 DELAI_IA_MS = 50
-
-
-NODES = {
-    0: (411, 401), 1: (411, 277), 2: (531, 401), 3: (411, 522),
-    4: (291, 401), 5: (411, 185), 6: (612, 401), 7: (411, 607),
-    8: (210, 401), 9: (411, 25), 10: (762, 400), 11: (411, 760),
-    12: (57, 400), 13: (210, 92), 14: (612, 92), 15: (730, 242),
-    16: (730, 560), 17: (612, 695), 18: (210, 695), 19: (92, 560),
-    20: (92, 242),
-}
-
-ARETES_AXES = [
-    (0, 1), (1, 5), (5, 9), (0, 3), (3, 7), (7, 11),
-    (0, 2), (2, 6), (6, 10), (0, 4), (4, 8), (8, 12),
-]
-ARETES_INTERIEURES = [(1, 2), (2, 3), (3, 4), (4, 1)]
-ARETES_EXTERIEURES = [
-    (9, 14), (14, 15), (15, 10), (10, 16), (16, 17),
-    (17, 11), (11, 18), (18, 19), (19, 12), (12, 20),
-    (20, 13), (13, 9),
-]
-ARETES_LENTILLES = [
-    (13, 5), (5, 14), (15, 6), (6, 16),
-    (17, 7), (7, 18), (19, 8), (8, 20),
-]
-
-TYPE_ARETE = {}
-for _type, _liste in (("axe", ARETES_AXES), ("interieur", ARETES_INTERIEURES),
-                      ("exterieur", ARETES_EXTERIEURES), ("lentille", ARETES_LENTILLES)):
-    for _a, _b in _liste:
-        TYPE_ARETE[frozenset((_a, _b))] = _type
-
-ARETES = sorted(tuple(sorted(k)) for k in TYPE_ARETE)
-
-_adj = {n: set() for n in NODES}
-for _a, _b in ARETES:
-    _adj[_a].add(_b)
-    _adj[_b].add(_a)
-ADJ = {n: frozenset(v) for n, v in _adj.items()}
-
-
-def _bfs(depart):
-    dist = [-1] * len(NODES)
-    dist[depart] = 0
-    file = [depart]
-    for n in file:
-        for v in ADJ[n]:
-            if dist[v] == -1:
-                dist[v] = dist[n] + 1
-                file.append(v)
-    return dist
-
-
-DIST = [_bfs(n) for n in range(len(NODES))]
-
-
-VOLEUR = 0
-POLICE = 1
-
-
-Etat = namedtuple("Etat", "voleur policiers trait ply")
-
-
-def etat_initial():
-    return Etat(START_THIEF, tuple(sorted(START_COPS)), VOLEUR, 0)
-
-
-def cle(etat):
-    """Identifie une position (sans le numéro de demi-coup)."""
-    return (etat.voleur, etat.policiers, etat.trait)
-
-
-def est_libre(etat, case):
-    return case != etat.voleur and case not in etat.policiers
-
-
-def coups_legaux(etat):
-    """Liste des coups (depart, arrivee) possibles pour celui qui a le trait."""
-    if etat.trait == VOLEUR:
-        return [(etat.voleur, d) for d in sorted(ADJ[etat.voleur]) if est_libre(etat, d)]
-    coups = []
-    for p in etat.policiers:
-        for d in sorted(ADJ[p]):
-            if est_libre(etat, d):
-                coups.append((p, d))
-    return coups
-
-
-def simuler(etat, coup):
-    """Applique un coup SANS le vérifier (rapide, pour les bots)."""
-    depart, arrivee = coup
-    if etat.trait == VOLEUR:
-        return Etat(arrivee, etat.policiers, POLICE, etat.ply + 1)
-    policiers = tuple(sorted(arrivee if p == depart else p for p in etat.policiers))
-    return Etat(etat.voleur, policiers, VOLEUR, etat.ply + 1)
-
-
-def resultat(etat):
-    """'VOLEUR', 'POLICIERS', 'NUL' ou None si la partie continue."""
-    if etat.voleur == CENTER and etat.trait == POLICE:
-        return "VOLEUR"
-    if etat.trait == VOLEUR and not coups_legaux(etat):
-        return "POLICIERS"
-    if etat.trait == POLICE and not coups_legaux(etat):
-        return "NUL"
-    if etat.ply >= MAX_PLY:
-        return "NUL"
-    return None
-
-
-class Partie:
-    """Une partie en cours : état, historique, détection des répétitions."""
-
-    def __init__(self):
-        self.etat_depart = etat_initial()
-        self.reinitialiser()
-
-    def reinitialiser(self):
-        self.etat = self.etat_depart
-        self.historique = []
-        self.cles = [cle(self.etat)]
-        self.compteur = Counter(self.cles)
-        self.resultat = None
-        self.raison = None
-        fin = resultat(self.etat)
-        if fin is not None:
-            self._terminer(fin)
-
-    @property
-    def terminee(self):
-        return self.resultat is not None
-
-    def coups(self):
-        return [] if self.terminee else coups_legaux(self.etat)
-
-    def jouer(self, coup):
-        if self.terminee or coup not in coups_legaux(self.etat):
-            raise ValueError("coup illégal")
-        self.etat = simuler(self.etat, coup)
-        self.historique.append((coup, self.etat))
-        k = cle(self.etat)
-        self.cles.append(k)
-        self.compteur[k] += 1
-
-        fin = resultat(self.etat)
-        if fin is not None:
-            self._terminer(fin)
-        elif self.compteur[k] >= REPETITION_LIMIT:
-            self.resultat = "NUL"
-            self.raison = "REPETITION"
-
-    def annuler(self):
-        if not self.historique:
-            return False
-        self.historique.pop()
-        k = self.cles.pop()
-        self.compteur[k] -= 1
-        self.etat = self.historique[-1][1] if self.historique else self.etat_depart
-        self.resultat = None
-        self.raison = None
-        return True
-
-    def _terminer(self, fin):
-        self.resultat = fin
-        if fin == "VOLEUR":
-            self.raison = "CENTRE"
-        elif fin == "POLICIERS":
-            self.raison = "BLOQUE"
-        elif self.etat.trait == POLICE and not coups_legaux(self.etat):
-            self.raison = "AUCUN_COUP"
-        else:
-            self.raison = "MAX_COUPS"
-
-
-REGLES = {
-    "adjacence": ADJ,
-    "distances": DIST,
-    "centre": CENTER,
-    "etat_initial": etat_initial(),
-    "fn_coups_legaux": coups_legaux,
-    "fn_simuler": simuler,
-    "fn_resultat": resultat,
-    "fn_cle": cle,
-}
-
-
-def creer_observation(partie, role, profondeur, annule):
-    etat = partie.etat
-    observation = dict(REGLES)
-    observation.update({
-        "role": role,
-        "camp": VOLEUR if role == "voleur" else POLICE,
-        "etat": etat,
-        "voleur": etat.voleur,
-        "policiers": etat.policiers,
-        "tour": etat.ply,
-        "coups": coups_legaux(etat),
-        "historique": list(partie.cles),
-        "profondeur": profondeur,
-        "annule": annule,
-    })
-    return observation
 
 
 def charger_bots():
@@ -629,17 +431,18 @@ class Panneau:
 
 
 class Joueur:
-    """Un camp de la partie : un humain ou un bot."""
+    """Un camp de la partie : un humain, un bot, ou (en réseau) un adversaire distant."""
 
-    def __init__(self, type_joueur, profondeur):
+    def __init__(self, type_joueur, profondeur, nom=None):
         self.type = type_joueur
         self.profondeur = profondeur
-        self.module = None if type_joueur == "humain" else BOTS[type_joueur]
-        self.nom = nom_bot(type_joueur, profondeur)
+        self.distant = type_joueur == "distant"
+        self.module = None if type_joueur in ("humain", "distant") else BOTS[type_joueur]
+        self.nom = nom or ("Adversaire" if self.distant else nom_bot(type_joueur, profondeur))
 
     @property
     def humain(self):
-        return self.module is None
+        return self.module is None and not self.distant
 
 
 class EcranJeu:
@@ -1014,6 +817,8 @@ class EcranMenu:
         self.y_attente = y_jouer - 26
         self.bouton_jouer = Bouton((430, y_jouer, 240, 52), "Jouer", self.jouer)
         self.bouton_quitter = Bouton((690, y_jouer, 160, 52), "Quitter", app.quitter)
+        self.bouton_reseau = Bouton((870, y_jouer, 220, 52), "Jeu en réseau",
+                                    app.afficher_reseau, couleur=VERT_OK)
         self._preparer(self.type_police)
 
     def _boutons_types(self, y, camp):
@@ -1083,7 +888,8 @@ class EcranMenu:
 
     def evenement(self, event):
         boutons = [*self.boutons_voleur.values(), *self.boutons_police.values(),
-                   *self.presets.values(), self.bouton_jouer, self.bouton_quitter]
+                   *self.presets.values(), self.bouton_jouer, self.bouton_quitter,
+                   self.bouton_reseau]
         if self._a_profondeur(self.type_voleur):
             boutons += [self.moins["voleur"], self.plus["voleur"]]
         if self._a_profondeur(self.type_police):
@@ -1149,6 +955,444 @@ class EcranMenu:
 
         self.bouton_jouer.dessiner(surface)
         self.bouton_quitter.dessiner(surface)
+        self.bouton_reseau.dessiner(surface)
+
+
+
+class ChampTexte:
+    """Petite zone de saisie de texte."""
+
+    def __init__(self, rect, texte="", max_len=24, autorises=None):
+        self.rect = rect
+        self.texte = texte
+        self.max_len = max_len
+        self.autorises = autorises
+        self.focus = False
+
+    def evenement(self, event):
+        if event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+            self.focus = dans_rect(self.rect, event.pos)
+        elif event.type == pygame.KEYDOWN and self.focus:
+            if event.key == pygame.K_BACKSPACE:
+                self.texte = self.texte[:-1]
+            elif event.unicode and event.unicode.isprintable() and len(self.texte) < self.max_len:
+                if self.autorises is None or event.unicode in self.autorises:
+                    self.texte += event.unicode
+
+    def dessiner(self, surface):
+        pygame.draw.rect(surface, (255, 255, 255), self.rect, border_radius=8)
+        pygame.draw.rect(surface, POLICE_COULEUR if self.focus else (190, 195, 205),
+                         self.rect, 3 if self.focus else 2, border_radius=8)
+        curseur = "|" if self.focus and (pygame.time.get_ticks() // 500) % 2 == 0 else ""
+        image = police(20).render(self.texte + curseur, True, TEXTE)
+        surface.blit(image, (self.rect[0] + 12, self.rect[1] + (self.rect[3] - image.get_height()) // 2))
+
+
+def libelle_joueur(type_joueur, profondeur):
+    return nom_bot(type_joueur, profondeur)
+
+
+class EcranReseau:
+    """Configuration (héberger / rejoindre), puis salle d'attente."""
+
+    def __init__(self, app, message=""):
+        self.app = app
+        self.phase = "config"          # config | connexion | lobby
+        self.message = message
+        self.hebergement = True
+        self.type_joueur = "humain"
+        self.profondeur = DEFAULT_DEPTH
+        self.champ_nom = ChampTexte((330, 150, 300, 42), "Joueur", max_len=16)
+        self.champ_ip = ChampTexte((330, 330, 300, 42), "192.168.", max_len=21,
+                                   autorises="0123456789.:")
+
+        self.types = ["humain"] + list(BOTS)
+        self.boutons_types = {}
+        for i, t in enumerate(self.types):
+            rect = (170 + (i % 5) * 190, 232 + (i // 5) * 50, 175, 42)
+            libelle = "Humain" if t == "humain" else getattr(BOTS[t], "NOM", t)
+            self.boutons_types[t] = Bouton(rect, libelle, lambda t=t: self._choisir_type(t))
+        lignes = (len(self.types) + 4) // 5
+        self.y_prof = 232 + lignes * 50 + 4
+        self.moins = Bouton((330, self.y_prof, 48, 36), "−", lambda: self._profondeur(-1))
+        self.plus = Bouton((430, self.y_prof, 48, 36), "+", lambda: self._profondeur(1))
+        self.y_mode = self.y_prof + 56
+
+        self.bouton_heberger = Bouton((170, self.y_mode, 220, 46), "Héberger la partie",
+                                      lambda: self._choisir_mode(True))
+        self.bouton_rejoindre = Bouton((410, self.y_mode, 220, 46), "Rejoindre un ami",
+                                       lambda: self._choisir_mode(False))
+        self.y_ip = self.y_mode + 64
+        self.champ_ip.rect = (330, self.y_ip, 300, 42)
+        y_bas = HAUTEUR - 70
+        self.bouton_continuer = Bouton((430, y_bas, 240, 52), "Continuer", self._continuer)
+        self.bouton_retour = Bouton((690, y_bas, 160, 52), "Retour", self.retour, couleur=GRIS_NUL)
+
+        self.bouton_lancer = Bouton((430, y_bas, 240, 52), "Lancer la partie", self._lancer)
+        self.bouton_quitter_salle = Bouton((690, y_bas, 200, 52), "Quitter la salle",
+                                           self.retour, couleur=GRIS_NUL)
+
+        if app.session is not None and app.session.moi is not None:
+            self.phase = "lobby"
+
+    # ---- actions
+    def _choisir_type(self, t):
+        self.type_joueur = t
+
+    def _profondeur(self, delta):
+        self.profondeur = max(PROFONDEUR_MIN, min(PROFONDEUR_MAX, self.profondeur + delta))
+
+    def _choisir_mode(self, hebergement):
+        self.hebergement = hebergement
+
+    def _a_profondeur(self):
+        return self.type_joueur != "humain" and getattr(BOTS[self.type_joueur], "PROFONDEUR", False)
+
+    def _continuer(self):
+        nom = self.champ_nom.texte.strip() or "Joueur"
+        adresse, port = "127.0.0.1", PORT_DEFAUT
+        session = SessionReseau()
+        if self.hebergement:
+            try:
+                session.heberger(port)
+            except OSError as exc:
+                self.message = f"Impossible de démarrer le serveur sur le port {port} : {exc}"
+                return
+        else:
+            saisie = self.champ_ip.texte.strip()
+            if not saisie:
+                self.message = "Entrez l'adresse IP de l'ordinateur qui héberge."
+                return
+            adresse, _, p = saisie.partition(":")
+            if p:
+                try:
+                    port = int(p)
+                except ValueError:
+                    self.message = "Port invalide."
+                    return
+        self.app.session = session
+        self.app.config_reseau = {"type": self.type_joueur, "profondeur": self.profondeur}
+        session.connecter(adresse, port, nom, libelle_joueur(self.type_joueur, self.profondeur))
+        self.phase = "connexion"
+        self.message = ""
+
+    def _lancer(self):
+        s = self.app.session
+        if s is not None and s.hote and len(s.joueurs) == 2:
+            s.lancer()
+
+    def retour(self):
+        self.app.quitter_reseau()
+        self.app.afficher_menu()
+
+    # ---- événements
+    def evenement(self, event):
+        if self.phase == "config":
+            self.champ_nom.evenement(event)
+            if not self.hebergement:
+                self.champ_ip.evenement(event)
+            boutons = [*self.boutons_types.values(), self.bouton_heberger, self.bouton_rejoindre,
+                       self.bouton_continuer, self.bouton_retour]
+            if self._a_profondeur():
+                boutons += [self.moins, self.plus]
+            for b in boutons:
+                b.evenement(event)
+            if event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_RETURN:
+                    self._continuer()
+                elif event.key == pygame.K_ESCAPE:
+                    self.retour()
+        else:
+            for b in (self.bouton_lancer, self.bouton_quitter_salle):
+                b.evenement(event)
+            if event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                self.retour()
+
+    def evenement_reseau(self, nom, data):
+        if nom == "connecte":
+            self.phase = "lobby"
+            self.message = ""
+        elif nom == "echec":
+            self.app.quitter_reseau()
+            self.phase = "config"
+            self.message = data
+
+    def mise_a_jour(self, dt_ms):
+        s = self.app.session
+        self.bouton_lancer.actif = bool(s and s.hote and len(s.joueurs) == 2)
+
+    # ---- dessin
+    def _etiquette(self, surface, texte, pos, couleur=TEXTE):
+        surface.blit(police(18).render(texte, True, couleur), pos)
+
+    def dessiner(self, surface):
+        surface.fill(FOND)
+        titre = police(48, True).render("Jeu en réseau", True, TEXTE)
+        surface.blit(titre, titre.get_rect(center=(640, 60)))
+
+        if self.phase == "config":
+            self._dessiner_config(surface)
+        elif self.phase == "connexion":
+            texte = police(24).render("Connexion en cours…", True, TEXTE_PALE)
+            surface.blit(texte, texte.get_rect(center=(640, 300)))
+        else:
+            self._dessiner_lobby(surface)
+
+    def _dessiner_config(self, surface):
+        sous = police(22).render("Chaque PC choisit son joueur, puis l'un héberge et l'autre rejoint.",
+                                 True, TEXTE_PALE)
+        surface.blit(sous, sous.get_rect(center=(640, 108)))
+
+        self._etiquette(surface, "Votre pseudo", (170, 160))
+        self.champ_nom.dessiner(surface)
+
+        self._etiquette(surface, "Votre joueur (humain ou bot)", (170, 204))
+        for t, b in self.boutons_types.items():
+            b.dessiner(surface)
+            if t == self.type_joueur:
+                pygame.draw.rect(surface, VERT_OK, b.rect, 5, border_radius=10)
+        if self._a_profondeur():
+            self._etiquette(surface, f"Profondeur : {self.profondeur}", (170, self.y_prof + 6))
+            self.moins.dessiner(surface)
+            self.plus.dessiner(surface)
+
+        for b, actif in ((self.bouton_heberger, self.hebergement),
+                         (self.bouton_rejoindre, not self.hebergement)):
+            b.dessiner(surface)
+            if actif:
+                pygame.draw.rect(surface, VERT_OK, b.rect, 5, border_radius=10)
+
+        if self.hebergement:
+            info = f"Votre adresse à donner à l'ami : {ip_locale()}:{PORT_DEFAUT}"
+            surface.blit(police(18).render(info, True, TEXTE), (170, self.y_ip + 10))
+        else:
+            self._etiquette(surface, "IP de l'hôte", (170, self.y_ip + 10))
+            self.champ_ip.dessiner(surface)
+
+        if self.message:
+            texte = police(17, True).render(self.message, True, VOLEUR_COULEUR)
+            surface.blit(texte, texte.get_rect(center=(640, HAUTEUR - 100)))
+        self.bouton_continuer.dessiner(surface)
+        self.bouton_retour.dessiner(surface)
+
+    def _dessiner_lobby(self, surface):
+        s = self.app.session
+        sous = "Salle d'attente"
+        if s.hote:
+            sous += f" — dites à votre ami de rejoindre {ip_locale()}:{s.port}"
+        texte = police(22).render(sous, True, TEXTE_PALE)
+        surface.blit(texte, texte.get_rect(center=(640, 108)))
+
+        for slot in range(2):
+            y = 200 + slot * 110
+            pygame.draw.rect(surface, PANNEAU_FOND, (270, y, 740, 90), border_radius=12)
+            if slot < len(s.joueurs):
+                j = s.joueurs[slot]
+                moi = " (vous)" if slot == s.moi else ""
+                role = "Hôte" if slot == 0 else "Invité"
+                surface.blit(police(24, True).render(f"{j['nom']}{moi}", True, TEXTE), (294, y + 12))
+                surface.blit(police(17).render(f"{role} — {j['label']}", True, TEXTE_PALE), (294, y + 50))
+            else:
+                surface.blit(police(20).render("En attente d'un joueur…", True, TEXTE_PALE), (294, y + 32))
+
+        regle = ("Au début de chaque manche, un joueur choisit son camp (police ou voleur). "
+                 "L'hôte choisit la 1re manche, l'invité la 2e, etc.")
+        for i, ligne in enumerate(decouper_texte(regle, police(16), 700)):
+            surface.blit(police(16).render(ligne, True, TEXTE_PALE), (290, 450 + i * 22))
+
+        if self.message:
+            texte = police(17, True).render(self.message, True, VOLEUR_COULEUR)
+            surface.blit(texte, texte.get_rect(center=(640, HAUTEUR - 100)))
+        if s.hote:
+            self.bouton_lancer.dessiner(surface)
+        else:
+            texte = police(18).render("L'hôte va lancer la partie…", True, TEXTE_PALE)
+            surface.blit(texte, texte.get_rect(center=(550, HAUTEUR - 44)))
+        self.bouton_quitter_salle.dessiner(surface)
+
+
+class EcranChoixRole:
+    """Au début de chaque manche : un seul joueur choisit son camp, l'autre prend l'autre."""
+
+    def __init__(self, app):
+        self.app = app
+        s = app.session
+        self.je_choisis = s.chooser == s.moi
+        self.bouton_police = Bouton((300, 400, 320, 90), "Je joue les POLICIERS",
+                                    lambda: s.choisir_role("police"), couleur=POLICE_COULEUR)
+        self.bouton_voleur = Bouton((660, 400, 320, 90), "Je joue le VOLEUR",
+                                    lambda: s.choisir_role("voleur"), couleur=VOLEUR_COULEUR)
+        self.bouton_quitter = Bouton((540, HAUTEUR - 70, 200, 52), "Quitter", self.quitter,
+                                     couleur=GRIS_NUL)
+
+    def quitter(self):
+        self.app.quitter_reseau()
+        self.app.afficher_menu()
+
+    def evenement(self, event):
+        boutons = [self.bouton_quitter]
+        if self.je_choisis:
+            boutons += [self.bouton_police, self.bouton_voleur]
+        for b in boutons:
+            b.evenement(event)
+
+    def evenement_reseau(self, nom, data):
+        pass
+
+    def mise_a_jour(self, dt_ms):
+        pass
+
+    def dessiner(self, surface):
+        s = self.app.session
+        surface.fill(FOND)
+        titre = police(48, True).render(f"Manche {s.manche}", True, TEXTE)
+        surface.blit(titre, titre.get_rect(center=(640, 90)))
+
+        score = f"{s.nom_joueur(0)} {s.scores[0]}  —  {s.scores[1]} {s.nom_joueur(1)}"
+        image = police(26, True).render(score, True, TEXTE_PALE)
+        surface.blit(image, image.get_rect(center=(640, 170)))
+
+        if self.je_choisis:
+            message = "À vous de choisir votre camp :"
+        else:
+            message = f"{s.nom_joueur(s.chooser)} choisit son camp…"
+        image = police(30).render(message, True, TEXTE)
+        surface.blit(image, image.get_rect(center=(640, 300)))
+
+        if self.je_choisis:
+            self.bouton_police.dessiner(surface)
+            self.bouton_voleur.dessiner(surface)
+        else:
+            points = "." * ((pygame.time.get_ticks() // 500) % 4)
+            image = police(20).render(f"En attente{points}", True, TEXTE_PALE)
+            surface.blit(image, image.get_rect(center=(640, 420)))
+        self.bouton_quitter.dessiner(surface)
+
+
+class EcranJeuReseau(EcranJeu):
+    """Une manche en réseau : mon camp est joué ici (humain ou bot), l'autre est distant.
+
+    Tous les coups passent par le serveur : un coup local est envoyé puis appliqué
+    quand le serveur le renvoie (les deux PC voient donc exactement la même partie).
+    """
+
+    def __init__(self, app, donnees):
+        s = app.session
+        self.session = s
+        self.mon_camp = VOLEUR if donnees["roles"][s.moi] == "voleur" else POLICE
+        cfg = app.config_reseau
+        config = {"profondeur_voleur": cfg["profondeur"], "profondeur_police": cfg["profondeur"]}
+        config["voleur" if self.mon_camp == VOLEUR else "police"] = cfg["type"]
+        config["police" if self.mon_camp == VOLEUR else "voleur"] = "distant"
+        super().__init__(app, config)
+
+        self.joueurs[self.mon_camp].nom = self._nom_complet(s.moi)
+        self.joueurs[1 - self.mon_camp].nom = self._nom_complet(s.adversaire)
+        self.statut = f"Vous jouez {'le voleur' if self.mon_camp == VOLEUR else 'les policiers'}"
+
+        for cle in ("recommencer", "annuler", "indice"):
+            self.panneau.boutons[cle].actif = False
+        self.boutons_fin["rejouer"].texte = "Manche suivante"
+        self.boutons_fin["rejouer"].action = self._manche_suivante
+        self.boutons_fin["menu"].action = self.menu
+        self.attente_manche = False
+
+    def _nom_complet(self, slot):
+        s = self.session
+        j = s.joueurs[slot]
+        return f"{j['nom']} ({j['label']})"
+
+    # ---- les coups passent par le serveur
+    def _mode_apres_coup(self):
+        if self.joueur_courant().distant:
+            self.mode = "DISTANT"
+            self.ia_lancee = False
+        else:
+            super()._mode_apres_coup()
+
+    def _jouer(self, coup):
+        """Coup local (clic ou bot) : on l'envoie, il sera appliqué à son retour."""
+        self._reset_selection()
+        self.statut = ""
+        self.mode = "DISTANT"
+        self.session.jouer(coup)
+
+    def _appliquer(self, coup):
+        super()._jouer(coup)
+
+    def evenement_reseau(self, nom, data):
+        if nom == "coup":
+            if data["n"] != len(self.partie.historique):
+                self.session.demander_sync()
+                return
+            try:
+                self._appliquer(tuple(data["coup"]))
+            except ValueError:
+                self.session.demander_sync()
+        elif nom == "sync":
+            self._reconstruire([tuple(c) for c in data["coups"]])
+        elif nom == "erreur":
+            self.statut = data.get("message", "Erreur")
+            self.session.demander_sync()
+
+    def _reconstruire(self, coups):
+        self._annuler_ia()
+        self.partie.reinitialiser()
+        for coup in coups:
+            self.partie.jouer(coup)
+        self.animation = None
+        self.mouvement = None
+        self._reset_selection()
+        self.dernier_coup = coups[-1] if coups else None
+        if self.partie.terminee:
+            self.mode = "GAME_OVER"
+        else:
+            self._mode_apres_coup()
+
+    def evenement(self, event):
+        if event.type == pygame.KEYDOWN and event.key in (pygame.K_r, pygame.K_u, pygame.K_h):
+            return
+        super().evenement(event)
+
+    def _manche_suivante(self):
+        self.session.manche_suivante()
+        self.attente_manche = True
+
+    def menu(self):
+        self._annuler_ia()
+        self.app.quitter_reseau()
+        self.app.afficher_menu()
+
+    def mise_a_jour(self, dt_ms):
+        super().mise_a_jour(dt_ms)
+        if self.partie.terminee:
+            return
+        if self.mode == "DISTANT":
+            if self.joueur_courant().distant:
+                self.statut = f"En attente du coup de {self.session.nom_joueur(self.session.adversaire)}…"
+            else:
+                self.statut = "Envoi du coup…"
+        elif self.mode in ("HUMAIN", "SELECTION") and self.statut.startswith(("En attente", "Envoi")):
+            self.statut = "À vous de jouer"
+
+    def dessiner(self, surface):
+        super().dessiner(surface)
+        s = self.session
+        if self.mode == "GAME_OVER":
+            gagnant = {"VOLEUR": VOLEUR, "POLICIERS": POLICE}.get(self.partie.resultat)
+            if gagnant is None:
+                phrase = "Personne ne marque de point."
+            else:
+                nom = s.nom_joueur(s.moi if gagnant == self.mon_camp else s.adversaire)
+                phrase = f"Point pour {nom} !"
+            image = police(22, True).render(phrase, True, TEXTE)
+            surface.blit(image, image.get_rect(center=(640, 395)))
+            score = f"{s.nom_joueur(0)} {s.scores[0]}  —  {s.scores[1]} {s.nom_joueur(1)}"
+            image = police(20).render(score, True, TEXTE_PALE)
+            surface.blit(image, image.get_rect(center=(640, 428)))
+            if self.attente_manche:
+                image = police(16).render("En attente du choix du camp…", True, TEXTE_PALE)
+                surface.blit(image, image.get_rect(center=(640, 530)))
 
 
 class Application:
@@ -1170,11 +1414,14 @@ class Application:
         self.toile = pygame.Surface((LARGEUR, HAUTEUR))
         self.horloge = pygame.time.Clock()
         self.actif = True
+        self.session = None          # SessionReseau quand on joue en réseau
+        self.config_reseau = {"type": "humain", "profondeur": DEFAULT_DEPTH}
         self.ecran = EcranMenu(self)
         if plein_ecran:
             self.basculer_plein_ecran()
 
     def quitter(self):
+        self.quitter_reseau()
         self.actif = False
 
     def afficher_menu(self):
@@ -1182,6 +1429,39 @@ class Application:
 
     def demarrer_partie(self, config):
         self.ecran = EcranJeu(self, config)
+
+    # ---- réseau
+    def afficher_reseau(self, message=""):
+        self.ecran = EcranReseau(self, message)
+
+    def quitter_reseau(self):
+        if self.session is not None:
+            self.session.fermer()
+            self.session = None
+
+    def traiter_reseau(self):
+        """Distribue les événements Socket.IO reçus (venant d'un autre thread)."""
+        while self.session is not None:
+            try:
+                nom, data = self.session.file.get_nowait()
+            except queue.Empty:
+                return
+            self._evenement_reseau(nom, data)
+
+    def _evenement_reseau(self, nom, data):
+        if nom == "choix_role":
+            self.ecran = EcranChoixRole(self)
+        elif nom == "manche":
+            self.ecran = EcranJeuReseau(self, data)
+        elif nom == "adversaire_parti":
+            self.ecran = EcranReseau(self, "Votre adversaire a quitté la partie.")
+        elif nom == "deconnecte":
+            self.quitter_reseau()
+            self.afficher_reseau("Connexion perdue.")
+        elif nom == "echec":
+            self.ecran.evenement_reseau(nom, data)
+        elif hasattr(self.ecran, "evenement_reseau"):
+            self.ecran.evenement_reseau(nom, data)
 
     def basculer_plein_ecran(self):
         self.plein_ecran = not self.plein_ecran
@@ -1231,6 +1511,7 @@ class Application:
                         pass
                     else:
                         self.ecran.evenement(self._vers_toile(event))
+                self.traiter_reseau()
                 self.ecran.mise_a_jour(dt_ms)
                 self.ecran.dessiner(self.toile)
                 self._afficher()
