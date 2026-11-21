@@ -3,10 +3,10 @@ from collections import Counter
 
 from config import MAX_PLY, REPETITION_LIMIT, WIN_SCORE
 
-NOM = "Minimax MAX"
+NOM = "Bot Andy"
 ORDRE = 5
 PROFONDEUR = False
-DESCRIPTION = "Minimax avancé : approfondissement itératif + table de transposition."
+DESCRIPTION = "Bot Andy est un bot qui utilise un algorithme de minimax avancé pour choisir le meilleur coup."
 
 TEMPS_MAX_S = 0.5
 PROFONDEUR_MAX = 80
