@@ -1,1 +1,4 @@
 pygame>=2.5
+python-socketio[client]>=5.11
+simple-websocket>=1.0
+werkzeug>=3.0
